@@ -46,6 +46,11 @@ type Driver struct {
 	UserID               string
 	VCNCompartmentID     string
 	VCNID                string
+	IsRover              bool
+	RoverComputeEndpoint string
+	RoverNetworkEndpoint string
+	RoverCertContents    string
+	RoverCertPath        string
 	// Runtime values
 	InstanceID string
 }
@@ -94,7 +99,7 @@ func (d *Driver) Create() error {
 		return err
 	}
 
-	d.InstanceID, err = oci.CreateInstance(defaultNodeNamePfx+d.MachineName, d.AvailabilityDomain, d.NodeCompartmentID, d.Shape, d.Image, d.SubnetID, string(publicKeyBytes))
+	d.InstanceID, err = oci.CreateInstance(d, string(publicKeyBytes))
 	if err != nil {
 		return err
 	}
@@ -218,6 +223,26 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Usage:  "Specify pre-existing VCN id in which you want to create the node(s)",
 			EnvVar: "OCI_VCN_ID",
 		},
+		mcnflag.BoolFlag{
+			Name:   "oci-is-rover",
+			Usage:  "Specify if the plugin is used for a oci rover device",
+			EnvVar: "OCI_IS_ROVER",
+		},
+		mcnflag.StringFlag{
+			Name:   "oci-rover-compute-endpoint",
+			Usage:  "Specify compute endpoint for rover",
+			EnvVar: "OCI_ROVER_COMPUTE_ENDPOINT",
+		},
+		mcnflag.StringFlag{
+			Name:   "oci-rover-network-endpoint",
+			Usage:  "SSpecify network endpoint for rover",
+			EnvVar: "OCI_ROVER_NETWORK_ENDPOINT",
+		},
+		mcnflag.StringFlag{
+			Name:   "oci-rover-cert-path",
+			Usage:  "Specify rover cert key path for the specified OCI user, in PEM format",
+			EnvVar: "OCI_ROVER_CERT_PATH",
+		},
 	}
 }
 
@@ -321,7 +346,9 @@ func (d *Driver) Kill() error {
 // PreCreateCheck allows for pre-create operations to make sure a driver is ready for creation
 func (d *Driver) PreCreateCheck() error {
 	log.Debug("oci.PreCreateCheck()")
-
+	if d.IsRover {
+		return nil
+	}
 	// Check that the node image exists, which will also validate the credentials.
 	log.Infof("Verifying node image availability... ")
 
@@ -426,7 +453,12 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.Image = flags.String("oci-node-image")
 	d.SSHUser = flags.String("oci-ssh-user")
 	d.SSHPort = flags.Int("oci-ssh-port")
-
+	d.IsRover = flags.Bool("oci-is-rover")
+	d.RoverComputeEndpoint = flags.String("oci-rover-compute-endpoint")
+	d.RoverNetworkEndpoint = flags.String("oci-rover-network-endpoint")
+	d.RoverCertPath = flags.String("oci-rover-cert-path")
+	d.RoverCertContents = flags.String("oci-private-key-contents")
+	log.Debug("oci rover  ", d.IsRover)
 	return nil
 }
 
@@ -463,7 +495,7 @@ func (d *Driver) initOCIClient() (Client, error) {
 		d.PrivateKeyContents,
 		&d.PrivateKeyPassphrase)
 
-	ociClient, err := newClient(configurationProvider)
+	ociClient, err := newClient(configurationProvider, d)
 	if err != nil {
 		return Client{}, err
 	}

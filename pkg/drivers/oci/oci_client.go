@@ -2,11 +2,15 @@ package oci
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"github.com/oracle/oci-go-sdk/example/helpers"
 	"github.com/rancher/machine/libmachine/log"
+	"io/ioutil"
+	"net/http"
 	"strings"
 	"time"
 
@@ -25,7 +29,7 @@ type Client struct {
 	// TODO we could also include the retry settings here
 }
 
-func newClient(configuration common.ConfigurationProvider) (*Client, error) {
+func newClient(configuration common.ConfigurationProvider, d *Driver) (*Client, error) {
 
 	computeClient, err := core.NewComputeClientWithConfigurationProvider(configuration)
 	if err != nil {
@@ -36,6 +40,30 @@ func newClient(configuration common.ConfigurationProvider) (*Client, error) {
 	if err != nil {
 		log.Debugf("create new VirtualNetwork client failed with err %v", err)
 		return nil, err
+	}
+	if d.IsRover {
+		computeClient.Host = d.RoverComputeEndpoint
+		vNetClient.Host = d.RoverNetworkEndpoint
+		pool := x509.NewCertPool()
+		pem, err := ioutil.ReadFile(d.RoverCertPath)
+		if err != nil {
+			panic("can not read cert " + err.Error())
+		}
+		pool.AppendCertsFromPEM(pem)
+		if h, ok := computeClient.HTTPClient.(*http.Client); ok {
+			tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
+			h.Transport = tr
+		} else {
+			panic("the client dispatcher is not of http.Client type. can not patch the tls config")
+		}
+
+		if h, ok := vNetClient.HTTPClient.(*http.Client); ok {
+			//tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+			tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
+			h.Transport = tr
+		} else {
+			panic("the client dispatcher is not of http.Client type. can not patch the tls config")
+		}
 	}
 	identityClient, err := identity.NewIdentityClientWithConfigurationProvider(configuration)
 	if err != nil {
@@ -53,48 +81,27 @@ func newClient(configuration common.ConfigurationProvider) (*Client, error) {
 }
 
 // CreateInstance creates a new compute instance.
-func (c *Client) CreateInstance(displayName, availabilityDomain, compartmentID, nodeShape, nodeImageName, nodeSubnetID, authorizedKeys string) (string, error) {
+func (c *Client) CreateInstance(d *Driver, authorizedKeys string) (string, error) {
+	displayName := defaultNodeNamePfx + d.MachineName
+	availabilityDomain := d.AvailabilityDomain
+	compartmentID := d.NodeCompartmentID
+	nodeShape := d.Shape
+	nodeImageName := d.Image
+	nodeSubnetID := d.SubnetID
+	var request core.LaunchInstanceRequest
+	var err error
+	if d.IsRover {
+		log.Debug("inside rover")
+		err, request = c.createReqForRover(displayName, availabilityDomain, compartmentID, nodeShape, nodeImageName, nodeSubnetID, authorizedKeys)
+	} else {
+		err, request = c.createReqForOCi(displayName, availabilityDomain, compartmentID, nodeShape, nodeImageName, nodeSubnetID, authorizedKeys)
 
-	req := identity.ListAvailabilityDomainsRequest{}
-	req.CompartmentId = &compartmentID
-	ads, err := c.identityClient.ListAvailabilityDomains(context.Background(), req)
+	}
 	if err != nil {
 		return "", err
 	}
 
-	// Just in case shortened or lower-case availability domain name was used
-	log.Debugf("Resolving availability domain from %s", availabilityDomain)
-	for _, ad := range ads.Items {
-		if strings.Contains(*ad.Name, strings.ToUpper(availabilityDomain)) {
-			log.Debugf("Availability domain %s", *ad.Name)
-			availabilityDomain = *ad.Name
-		}
-	}
-
-	imageID, err := c.getImageID(compartmentID, nodeImageName)
-	if err != nil {
-		return "", err
-	}
-	// Create the launch compute instance request
-	request := core.LaunchInstanceRequest{
-		LaunchInstanceDetails: core.LaunchInstanceDetails{
-			AvailabilityDomain: &availabilityDomain,
-			CompartmentId:      &compartmentID,
-			Shape:              &nodeShape,
-			CreateVnicDetails: &core.CreateVnicDetails{
-				SubnetId: &nodeSubnetID,
-			},
-			DisplayName: &displayName,
-			Metadata: map[string]string{
-				"ssh_authorized_keys": authorizedKeys,
-				"user_data":           base64.StdEncoding.EncodeToString(createCloudInitScript()),
-			},
-			SourceDetails: core.InstanceSourceViaImageDetails{
-				ImageId: imageID,
-			},
-		},
-	}
-
+	log.Debug("request is ", request)
 	createResp, err := c.computeClient.LaunchInstance(context.Background(), request)
 	if err != nil {
 		return "", err
@@ -121,6 +128,84 @@ func (c *Client) CreateInstance(displayName, availabilityDomain, compartmentID, 
 	}
 
 	return *instance.Id, nil
+}
+
+func (c *Client) createReqForOCi(displayName string, availabilityDomain string, compartmentID string, nodeShape string, nodeImageName string, nodeSubnetID string, authorizedKeys string) (error, core.LaunchInstanceRequest) {
+	req := identity.ListAvailabilityDomainsRequest{}
+	req.CompartmentId = &compartmentID
+	ads, err := c.identityClient.ListAvailabilityDomains(context.Background(), req)
+	if err != nil {
+		return nil, core.LaunchInstanceRequest{}
+	}
+
+	// Just in case shortened or lower-case availability domain name was used
+	log.Debugf("Resolving availability domain from %s", availabilityDomain)
+	for _, ad := range ads.Items {
+		if strings.Contains(*ad.Name, strings.ToUpper(availabilityDomain)) {
+			log.Debugf("Availability domain %s", *ad.Name)
+			availabilityDomain = *ad.Name
+		}
+	}
+
+	imageID, err := c.getImageID(compartmentID, nodeImageName)
+	if err != nil {
+		return nil, core.LaunchInstanceRequest{}
+	}
+	// Create the launch compute instance request
+	request := core.LaunchInstanceRequest{
+		LaunchInstanceDetails: core.LaunchInstanceDetails{
+			AvailabilityDomain: &availabilityDomain,
+			CompartmentId:      &compartmentID,
+			Shape:              &nodeShape,
+			CreateVnicDetails: &core.CreateVnicDetails{
+				SubnetId: &nodeSubnetID,
+			},
+			DisplayName: &displayName,
+			Metadata: map[string]string{
+				"ssh_authorized_keys": authorizedKeys,
+				"user_data":           base64.StdEncoding.EncodeToString(createCloudInitScript()),
+			},
+			SourceDetails: core.InstanceSourceViaImageDetails{
+				ImageId: imageID,
+			},
+		},
+	}
+	return err, request
+}
+
+func (c *Client) createReqForRover(displayName string, availabilityDomain string, compartmentID string, nodeShape string, nodeImageName string, nodeSubnetID string, authorizedKeys string) (error, core.LaunchInstanceRequest) {
+	imageID, err := c.getImageID(compartmentID, nodeImageName)
+	if err != nil {
+		log.Error(err)
+		log.Debug("inside error bhau", err)
+		return nil, core.LaunchInstanceRequest{}
+	}
+	// Create the launch compute instance request
+	request := core.LaunchInstanceRequest{
+		LaunchInstanceDetails: core.LaunchInstanceDetails{
+			AvailabilityDomain: common.String("OREI-1-AD-1"),
+			CompartmentId:      &compartmentID,
+			Shape:              &nodeShape,
+			CreateVnicDetails: &core.CreateVnicDetails{
+				SubnetId:       &nodeSubnetID,
+				AssignPublicIp: common.Bool(true),
+			},
+			FaultDomain: common.String("FAULT-DOMAIN-1"),
+			DisplayName: &displayName,
+			Metadata: map[string]string{
+				"ssh_authorized_keys": authorizedKeys,
+				"user_data":           base64.StdEncoding.EncodeToString(createCloudInitScript()),
+			},
+			SourceDetails: core.InstanceSourceViaImageDetails{
+				ImageId:             imageID,
+				BootVolumeSizeInGBs: common.Int64(50),
+			},
+			AgentConfig: &core.LaunchInstanceAgentConfigDetails{
+				IsMonitoringDisabled: common.Bool(true),
+			},
+		},
+	}
+	return err, request
 }
 
 // GetInstance gets a compute instance by id.
@@ -265,26 +350,45 @@ func (c *Client) getImageID(compartmentID, nodeImageName string) (*string, error
 	if nodeImageName == "" || compartmentID == "" {
 		return nil, errors.New("cannot retrieve image ID without a compartment and image name")
 	}
-
 	// Get list of images
 	log.Debugf("Resolving image ID from %s", nodeImageName)
-	request := core.ListImagesRequest{
-		CompartmentId:   &compartmentID,
-		SortBy:          core.ListImagesSortByTimecreated,
-		RequestMetadata: helpers.GetRequestMetadataWithDefaultRetryPolicy(),
-	}
-	r, err := c.computeClient.ListImages(context.Background(), request)
-	if err != nil {
-		return nil, err
-	}
+	var page *string
+	for {
+		request := core.ListImagesRequest{
+			CompartmentId:  &compartmentID,
+			SortBy:         core.ListImagesSortByTimecreated,
+			SortOrder:      core.ListImagesSortOrderDesc,
+			LifecycleState: core.ImageLifecycleStateAvailable,
+			RequestMetadata: common.RequestMetadata{
+				RetryPolicy: &common.RetryPolicy{
+					MaximumNumberAttempts: 3,
+					ShouldRetryOperation: func(r common.OCIOperationResponse) bool {
+						return !(r.Error == nil && r.Response.HTTPResponse().StatusCode/100 == 2)
+					},
 
-	// Loop through the items to find an image to use.  The list is sorted by time created in descending order
-	for _, image := range r.Items {
-		if strings.HasPrefix(*image.DisplayName, nodeImageName) {
-			if !strings.Contains(*image.DisplayName, "GPU") {
-				log.Debugf("Using node image %s", *image.DisplayName)
+					NextDuration: func(response common.OCIOperationResponse) time.Duration {
+						return 3 * time.Second
+					},
+				},
+			},
+			Page: page,
+		}
+		//request := core.ListImagesRequest{CompartmentId: common.String(compartmentID)}
+		r, err := c.computeClient.ListImages(context.Background(), request)
+		log.Infof("r is", r)
+		if err != nil {
+			return nil, err
+		}
+		// Loop through the items to find an image to use.  The list is sorted by time created in descending order
+		for _, image := range r.Items {
+			if strings.EqualFold(*image.DisplayName, nodeImageName) {
+				log.Infof("Provisioning node using image %s", *image.DisplayName)
 				return image.Id, nil
 			}
+		}
+
+		if page = r.OpcNextPage; r.OpcNextPage == nil {
+			break
 		}
 	}
 
