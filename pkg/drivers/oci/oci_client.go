@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"github.com/oracle/oci-go-sdk/example/helpers"
 	"github.com/rancher/machine/libmachine/log"
-	"io/ioutil"
 	"net/http"
 	"strings"
 	"time"
@@ -45,11 +44,11 @@ func newClient(configuration common.ConfigurationProvider, d *Driver) (*Client, 
 		computeClient.Host = d.RoverComputeEndpoint
 		vNetClient.Host = d.RoverNetworkEndpoint
 		pool := x509.NewCertPool()
-		pem, err := ioutil.ReadFile(d.RoverCertPath)
+		//pem, err := ioutil.ReadFile(d.RoverCertPath)
 		if err != nil {
 			panic("can not read cert " + err.Error())
 		}
-		pool.AppendCertsFromPEM(pem)
+		pool.AppendCertsFromPEM([]byte(d.RoverCertContent))
 		if h, ok := computeClient.HTTPClient.(*http.Client); ok {
 			tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
 			h.Transport = tr

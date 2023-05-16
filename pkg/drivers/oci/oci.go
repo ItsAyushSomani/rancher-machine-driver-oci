@@ -51,6 +51,7 @@ type Driver struct {
 	RoverNetworkEndpoint string
 	RoverCertContents    string
 	RoverCertPath        string
+	RoverCertContent     string
 	// Runtime values
 	InstanceID string
 }
@@ -242,6 +243,11 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Name:   "oci-rover-cert-path",
 			Usage:  "Specify rover cert key path for the specified OCI user, in PEM format",
 			EnvVar: "OCI_ROVER_CERT_PATH",
+		},
+		mcnflag.StringFlag{
+			Name:   "oci-rover-cert-content",
+			Usage:  "Specify rover cert key content for the specified OCI user, in PEM format",
+			EnvVar: "OCI_ROVER_CERT_CONTENT",
 		},
 	}
 }
@@ -457,8 +463,13 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.RoverComputeEndpoint = flags.String("oci-rover-compute-endpoint")
 	d.RoverNetworkEndpoint = flags.String("oci-rover-network-endpoint")
 	d.RoverCertPath = flags.String("oci-rover-cert-path")
-	d.RoverCertContents = flags.String("oci-private-key-contents")
-	log.Debug("oci rover  ", d.IsRover)
+	d.RoverCertContent = flags.String("oci-rover-cert-content")
+	if d.IsRover && d.RoverCertPath == "" && d.RoverCertContent != "" {
+		roverCertBytes, err := ioutil.ReadFile(d.RoverCertPath)
+		if err == nil {
+			d.RoverCertContent = string(roverCertBytes)
+		}
+	}
 	return nil
 }
 
